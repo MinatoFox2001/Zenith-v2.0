@@ -1,4 +1,3 @@
-# admin_manager.py
 from aiogram import types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from config import BotConfig
@@ -25,12 +24,20 @@ class AdminManager:
             resize_keyboard=True
         )
 
-    async def show_all_users(self, message: types.Message, reply_markup=None):
+    async def show_all_users(self, message: types.Message, message_manager, reply_markup=None):
         try:
+            # Удаляем предыдущее сообщение пользователя
+            await message_manager.delete_previous_message(message.from_user.id)
+            
             users = await self.database.get_all_users()
             
             if not users:
-                await message.answer("📭 В базе данных нет пользователей", reply_markup=reply_markup)
+                await message_manager.send_or_edit_message(
+                    chat_id=message.chat.id,
+                    user_id=message.from_user.id,
+                    text="📭 В базе данных нет пользователей",
+                    reply_markup=reply_markup
+                )
                 return
             
             users_text = "👥 Все пользователи:\n\n"
@@ -49,17 +56,39 @@ class AdminManager:
                 parts = [users_text[i:i+4000] for i in range(0, len(users_text), 4000)]
                 for i, part in enumerate(parts):
                     if i == len(parts) - 1:
-                        await message.answer(part, reply_markup=reply_markup)
+                        await message_manager.send_or_edit_message(
+                            chat_id=message.chat.id,
+                            user_id=message.from_user.id,
+                            text=part,
+                            reply_markup=reply_markup
+                        )
                     else:
-                        await message.answer(part)
+                        await message_manager.send_or_edit_message(
+                            chat_id=message.chat.id,
+                            user_id=message.from_user.id,
+                            text=part
+                        )
             else:
-                await message.answer(users_text, reply_markup=reply_markup)
+                await message_manager.send_or_edit_message(
+                    chat_id=message.chat.id,
+                    user_id=message.from_user.id,
+                    text=users_text,
+                    reply_markup=reply_markup
+                )
         except Exception as e:
             logger.error(f"Error showing users: {e}")
-            await message.answer("❌ Ошибка при получении пользователей", reply_markup=reply_markup)
+            await message_manager.send_or_edit_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                text="❌ Ошибка при получении пользователей",
+                reply_markup=reply_markup
+            )
 
-    async def show_admin_stats(self, message: types.Message, reply_markup=None):
+    async def show_admin_stats(self, message: types.Message, message_manager, reply_markup=None):
         try:
+            # Удаляем предыдущее сообщение пользователя
+            await message_manager.delete_previous_message(message.from_user.id)
+            
             users = await self.database.get_all_users()
             users_count = await self.database.get_users_count()
             
@@ -88,11 +117,24 @@ class AdminManager:
                 for i, user in enumerate(users[:5], 1):
                     stats_text += f"\n{i}. {user['first_name']} (@{user['username'] or 'нет username'}) - {user['state']}"
             
-            await message.answer(stats_text, reply_markup=reply_markup)
+            await message_manager.send_or_edit_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                text=stats_text,
+                reply_markup=reply_markup
+            )
         except Exception as e:
             logger.error(f"Error showing stats: {e}")
-            await message.answer("❌ Ошибка при получении статистики", reply_markup=reply_markup)
+            await message_manager.send_or_edit_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                text="❌ Ошибка при получении статистики",
+                reply_markup=reply_markup
+            )
 
-    async def back_to_main_menu(self, message: types.Message):
+    async def back_to_main_menu(self, message: types.Message, message_manager):
         from database import UserState
         await self.database.set_user_state(message.from_user.id, UserState.MAIN)
+        
+        # Очищаем историю сообщений пользователя
+        message_manager.clear_user_messages(message.from_user.id)

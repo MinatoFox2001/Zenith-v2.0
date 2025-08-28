@@ -1,4 +1,3 @@
-# main.py
 import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -11,6 +10,76 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
+class MessageManager:
+    """Универсальный менеджер для работы с сообщениями"""
+    
+    def __init__(self, bot: Bot):
+        self.bot = bot
+        self.user_messages = {}  # Хранит последние сообщения по user_id
+    
+    async def send_or_edit_message(
+        self,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup = None,
+        parse_mode: str = None
+    ) -> types.Message:
+        """
+        Универсальный метод для отправки или редактирования сообщения
+        """
+        if user_id in self.user_messages and self.user_messages[user_id].get('message_id'):
+            try:
+                # Пытаемся отредактировать существующее сообщение
+                message = await self.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=self.user_messages[user_id]['message_id'],
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+                self.user_messages[user_id] = {
+                    'message_id': message.message_id,
+                    'chat_id': chat_id
+                }
+                return message
+            except Exception as e:
+                # Если редактирование не удалось (например, сообщение было удалено),
+                # отправляем новое сообщение и удаляем старое
+                logging.warning(f"Failed to edit message: {e}. Sending new message.")
+                await self.delete_previous_message(user_id)
+        
+        # Отправляем новое сообщение
+        message = await self.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+        
+        self.user_messages[user_id] = {
+            'message_id': message.message_id,
+            'chat_id': chat_id
+        }
+        return message
+    
+    async def delete_previous_message(self, user_id: int):
+        """Удаляет предыдущее сообщение пользователя"""
+        if user_id in self.user_messages:
+            try:
+                await self.bot.delete_message(
+                    chat_id=self.user_messages[user_id]['chat_id'],
+                    message_id=self.user_messages[user_id]['message_id']
+                )
+            except Exception as e:
+                logging.warning(f"Failed to delete message: {e}")
+            finally:
+                # Удаляем запись о сообщении
+                self.user_messages.pop(user_id, None)
+    
+    def clear_user_messages(self, user_id: int):
+        """Очищает историю сообщений пользователя"""
+        self.user_messages.pop(user_id, None)
 
 async def main():
     # Инициализация конфигурации
@@ -28,6 +97,9 @@ async def main():
     bot = Bot(token=bot_config.token)
     dp = Dispatcher()
     
+    # Инициализация менеджера сообщений
+    message_manager = MessageManager(bot)
+    
     # Добавляем middleware для обработки состояний
     dp.message.middleware(UserStateMiddleware(database))
     dp.callback_query.middleware(UserStateMiddleware(database))
@@ -38,13 +110,13 @@ async def main():
             [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="personal_cabinet")],
             [InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about_project")]
         ]
-    
+
         # Добавляем кнопку админа только если пользователь является администратором
         if is_admin:
             keyboard.insert(0, [InlineKeyboardButton(text="🛠️ Админ панель", callback_data="admin_panel")])
-    
+
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
-    
+
     def get_personal_cabinet_keyboard():
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -52,21 +124,21 @@ async def main():
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
             ]
         )
-    
+
     def get_back_to_main_keyboard():
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
             ]
         )
-    
+
     def get_back_to_cabinet_keyboard():
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_cabinet")]
             ]
         )
-    
+
     def get_admin_main_keyboard():
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -75,7 +147,7 @@ async def main():
                 [InlineKeyboardButton(text="🔙 Основное меню", callback_data="admin_back_to_main")]
             ]
         )
-    
+
     def get_admin_back_keyboard():
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -86,6 +158,12 @@ async def main():
     # Обработчик команды /start
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message, user_state: UserState):
+        # Удаляем сообщение пользователя с командой /start
+        try:
+            await message.delete()
+        except Exception as e:
+            logging.warning(f"Failed to delete user message: {e}")
+        
         # Сохраняем пользователя в базу данных и получаем состояние
         current_state = await database.add_user(
             user_id=message.from_user.id,
@@ -97,8 +175,13 @@ async def main():
         is_admin_user = admin_manager.is_admin(message.from_user)
         welcome_message = await get_welcome_message(message.from_user, is_admin_user)
         
-        # Передаем флаг is_admin в клавиатуру
-        await message.answer(welcome_message, reply_markup=get_main_inline_keyboard(is_admin_user))
+        # Используем универсальный метод для отправки/редактирования сообщения
+        await message_manager.send_or_edit_message(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            text=welcome_message,
+            reply_markup=get_main_inline_keyboard(is_admin_user)
+        )
 
     async def get_welcome_message(user: types.User, is_admin_user: bool = False) -> str:
         # Получаем количество пользователей
@@ -129,8 +212,18 @@ async def main():
     # Команда /admin
     @dp.message(Command("admin"))
     async def cmd_admin(message: types.Message, user_state: UserState):
+        # Удаляем сообщение пользователя с командой /admin
+        try:
+            await message.delete()
+        except Exception as e:
+            logging.warning(f"Failed to delete user message: {e}")
+        
         if not admin_manager.is_admin(message.from_user):
-            await message.answer("⛔ У вас нет прав доступа к админ панели")
+            await message_manager.send_or_edit_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                text="⛔ У вас нет прав доступа к админ панели"
+            )
             return
         
         # Устанавливаем состояние админа
@@ -145,29 +238,60 @@ async def main():
         
         Используйте кнопки ниже для управления!
         """
-        await message.answer(admin_text, reply_markup=get_admin_main_keyboard())
+        await message_manager.send_or_edit_message(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            text=admin_text,
+            reply_markup=get_admin_main_keyboard()
+        )
 
     # Команда /users
     @dp.message(Command("users"))
     async def cmd_users(message: types.Message, user_state: UserState):
+        # Удаляем сообщение пользователя с командой /users
+        try:
+            await message.delete()
+        except Exception as e:
+            logging.warning(f"Failed to delete user message: {e}")
+        
         if not admin_manager.is_admin(message.from_user):
-            await message.answer("⛔ У вас нет прав доступа")
+            await message_manager.send_or_edit_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                text="⛔ У вас нет прав доступа"
+            )
             return
         
-        await admin_manager.show_all_users(message, get_admin_back_keyboard())
+        await admin_manager.show_all_users(message, message_manager, get_admin_back_keyboard())
 
     # Команда /stats
     @dp.message(Command("stats"))
     async def cmd_stats(message: types.Message, user_state: UserState):
+        # Удаляем сообщение пользователя с командой /stats
+        try:
+            await message.delete()
+        except Exception as e:
+            logging.warning(f"Failed to delete user message: {e}")
+        
         if not admin_manager.is_admin(message.from_user):
-            await message.answer("⛔ У вас нет прав доступа")
+            await message_manager.send_or_edit_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                text="⛔ У вас нет прав доступа"
+            )
             return
         
-        await admin_manager.show_admin_stats(message, get_admin_back_keyboard())
+        await admin_manager.show_admin_stats(message, message_manager, get_admin_back_keyboard())
 
     # Обработчик команды /help
     @dp.message(Command("help"))
     async def cmd_help(message: types.Message, user_state: UserState):
+        # Удаляем сообщение пользователя с командой /help
+        try:
+            await message.delete()
+        except Exception as e:
+            logging.warning(f"Failed to delete user message: {e}")
+        
         help_text = """
                     🤖 Zenith - универсальный помощник
 
@@ -190,11 +314,21 @@ async def main():
         if admin_manager.is_admin(message.from_user):
             help_text += "\n\n🛠️ Админ команды:\n/admin - панель управления\n/users - список пользователей\n/stats - детальная статистика"
         
-        await message.answer(help_text)
+        await message_manager.send_or_edit_message(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            text=help_text
+        )
 
     # Обработчик команды /info
     @dp.message(Command("info"))
     async def cmd_info(message: types.Message, user_state: UserState):
+        # Удаляем сообщение пользователя с командой /info
+        try:
+            await message.delete()
+        except Exception as e:
+            logging.warning(f"Failed to delete user message: {e}")
+        
         # Получаем информацию о пользователе из базы данных
         user_data = await database.get_user(message.from_user.id)
         
@@ -223,7 +357,11 @@ async def main():
         if admin_manager.is_admin(message.from_user):
             info_text += "\n\n⭐ Статус: Администратор бота"
         
-        await message.answer(info_text)
+        await message_manager.send_or_edit_message(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            text=info_text
+        )
 
     # Обработчик инлайн кнопок
     @dp.callback_query()
@@ -253,7 +391,12 @@ async def main():
             if admin_manager.is_admin(callback_query.from_user):
                 cabinet_text += "\n\n⭐ Статус: Администратор бота"
             
-            await callback_query.message.answer(cabinet_text, reply_markup=get_personal_cabinet_keyboard())
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=cabinet_text,
+                reply_markup=get_personal_cabinet_keyboard()
+            )
             
         elif data == "user_stats":
             # Получаем статистику
@@ -283,11 +426,21 @@ async def main():
                 for i, user in enumerate(users[:5], 1):
                     stats_text += f"\n{i}. {user['first_name']} (@{user['username'] or 'нет username'}) - {user['state']}"
             
-            await callback_query.message.answer(stats_text, reply_markup=get_back_to_cabinet_keyboard())
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=stats_text,
+                reply_markup=get_back_to_cabinet_keyboard()
+            )
             
         elif data == "about_project":
             about_text = "ℹ️ О проекте\n\nПозже тут появится информация о проекте"
-            await callback_query.message.answer(about_text, reply_markup=get_back_to_main_keyboard())
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=about_text,
+                reply_markup=get_back_to_main_keyboard()
+            )
             
         elif data == "back_to_main":
             # Возвращаемся в главное меню
@@ -295,8 +448,12 @@ async def main():
             welcome_message = await get_welcome_message(callback_query.from_user, is_admin_user)
             
             # Используем обновленную клавиатуру с проверкой админских прав
-            await callback_query.message.answer(welcome_message, 
-                                            reply_markup=get_main_inline_keyboard(is_admin_user))
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=welcome_message,
+                reply_markup=get_main_inline_keyboard(is_admin_user)
+            )
             
         elif data == "back_to_cabinet":
             # Возвращаемся в личный кабинет
@@ -321,7 +478,12 @@ async def main():
             if admin_manager.is_admin(callback_query.from_user):
                 cabinet_text += "\n\n⭐ Статус: Администратор бота"
             
-            await callback_query.message.answer(cabinet_text, reply_markup=get_personal_cabinet_keyboard())
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=cabinet_text,
+                reply_markup=get_personal_cabinet_keyboard()
+            )
         
         # Админские инлайн кнопки
         elif data == "admin_all_users":
@@ -329,14 +491,32 @@ async def main():
                 await callback_query.answer("⛔ У вас нет прав доступа")
                 return
             
-            await admin_manager.show_all_users(callback_query.message, get_admin_back_keyboard())
+            # Создаем временное сообщение для передачи в admin_manager
+            temp_message = types.Message(
+                message_id=callback_query.message.message_id,
+                from_user=callback_query.from_user,
+                chat=callback_query.message.chat,
+                date=callback_query.message.date,
+                text=""
+            )
+            
+            await admin_manager.show_all_users(temp_message, message_manager, get_admin_back_keyboard())
             
         elif data == "admin_stats":
             if not admin_manager.is_admin(callback_query.from_user):
                 await callback_query.answer("⛔ У вас нет прав доступа")
                 return
             
-            await admin_manager.show_admin_stats(callback_query.message, get_admin_back_keyboard())
+            # Создаем временное сообщение для передачи в admin_manager
+            temp_message = types.Message(
+                message_id=callback_query.message.message_id,
+                from_user=callback_query.from_user,
+                chat=callback_query.message.chat,
+                date=callback_query.message.date,
+                text=""
+            )
+            
+            await admin_manager.show_admin_stats(temp_message, message_manager, get_admin_back_keyboard())
             
         elif data == "admin_back_to_main":
             if not admin_manager.is_admin(callback_query.from_user):
@@ -351,8 +531,12 @@ async def main():
             welcome_message = await get_welcome_message(callback_query.from_user, is_admin_user)
             
             # Важно: передаем is_admin_user в клавиатуру
-            await callback_query.message.answer(welcome_message, 
-                                            reply_markup=get_main_inline_keyboard(is_admin_user))
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=welcome_message,
+                reply_markup=get_main_inline_keyboard(is_admin_user)
+            )
             
         elif data == "admin_back_to_main_menu":
             if not admin_manager.is_admin(callback_query.from_user):
@@ -369,7 +553,12 @@ async def main():
             
             Используйте кнопки ниже для управления!
             """
-            await callback_query.message.answer(admin_text, reply_markup=get_admin_main_keyboard())
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=admin_text,
+                reply_markup=get_admin_main_keyboard()
+            )
         elif data == "admin_panel":
             if not admin_manager.is_admin(callback_query.from_user):
                 await callback_query.answer("⛔ У вас нет прав доступа")
@@ -387,21 +576,36 @@ async def main():
             
             Используйте кнопки ниже для управления!
             """
-            await callback_query.message.answer(admin_text, reply_markup=get_admin_main_keyboard())
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=admin_text,
+                reply_markup=get_admin_main_keyboard()
+            )
         
         await callback_query.answer()
 
     # Обработчик любого текстового сообщения
     @dp.message()
     async def echo_message(message: types.Message, user_state: UserState):
-        # Пропускаем команды
-        if message.text.startswith('/'):
-            return
+        # Удаляем сообщение пользователя
+        try:
+            await message.delete()
+        except Exception as e:
+            logging.warning(f"Failed to delete user message: {e}")
             
         if user_state == UserState.MAIN:
-            await message.answer(f"Вы сказали: {message.text}")
+            await message_manager.send_or_edit_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                text=f"Вы сказали: {message.text}"
+            )
         else:
-            await message.answer("ℹ️ Используйте доступные команды или кнопки")
+            await message_manager.send_or_edit_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                text="ℹ️ Используйте доступные команды или кнопки"
+            )
 
     # Запускаем бота
     try:
