@@ -71,13 +71,118 @@ class Database:
         );
         """
         
+        create_balance_table = """
+        CREATE TABLE IF NOT EXISTS user_balance (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            balance_type VARCHAR(20) NOT NULL CHECK (balance_type IN ('bonus', 'rubles')),
+            amount DECIMAL(15, 2) DEFAULT 0.00,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, balance_type)
+        );
+        """
+        
+        create_transactions_table = """
+        CREATE TABLE IF NOT EXISTS transactions (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            balance_type VARCHAR(20) NOT NULL CHECK (balance_type IN ('bonus', 'rubles')),
+            amount DECIMAL(15, 2) NOT NULL,
+            transaction_type VARCHAR(20) NOT NULL CHECK (transaction_type IN ('deposit', 'withdraw', 'transfer', 'reward')),
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        
         try:
             async with self.pool.acquire() as connection:
                 await connection.execute(create_users_table)
+                await connection.execute(create_balance_table)
+                await connection.execute(create_transactions_table)
                 self.logger.info("✅ Tables created successfully")
         except Exception as e:
             self.logger.error(f"❌ Error creating tables: {e}")
             raise
+
+    # Добавляем методы для работы с балансом
+    async def get_balance(self, user_id: int, balance_type: str):
+        """Получение баланса пользователя"""
+        query = "SELECT amount FROM user_balance WHERE user_id = $1 AND balance_type = $2"
+        
+        try:
+            async with self.pool.acquire() as connection:
+                result = await connection.fetchval(query, user_id, balance_type)
+                return float(result) if result else 0.00
+        except Exception as e:
+            self.logger.error(f"❌ Error getting balance: {e}")
+            return 0.00
+
+    async def update_balance(self, user_id: int, balance_type: str, amount: float, transaction_type: str, description: str = None):
+        """Обновление баланса пользователя"""
+        # Начинаем транзакцию
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                # Обновляем баланс
+                update_query = """
+                INSERT INTO user_balance (user_id, balance_type, amount)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id, balance_type) 
+                DO UPDATE SET 
+                    amount = user_balance.amount + EXCLUDED.amount,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING amount
+                """
+                
+                new_balance = await connection.fetchval(update_query, user_id, balance_type, amount)
+                
+                # Добавляем запись в историю транзакций
+                transaction_query = """
+                INSERT INTO transactions (user_id, balance_type, amount, transaction_type, description)
+                VALUES ($1, $2, $3, $4, $5)
+                """
+                
+                await connection.execute(transaction_query, user_id, balance_type, amount, transaction_type, description)
+                
+                self.logger.info(f"✅ Balance updated for user {user_id}: {balance_type} {amount}")
+                return float(new_balance)
+
+    async def get_transaction_history(self, user_id: int, limit: int = 10):
+        """Получение истории транзакций"""
+        query = """
+        SELECT * FROM transactions 
+        WHERE user_id = $1 
+        ORDER BY created_at DESC 
+        LIMIT $2
+        """
+        
+        try:
+            async with self.pool.acquire() as connection:
+                result = await connection.fetch(query, user_id, limit)
+                return result
+        except Exception as e:
+            self.logger.error(f"❌ Error getting transaction history: {e}")
+            return []
+
+    async def get_all_balances(self):
+        """Получение общей статистики по балансам"""
+        query = """
+        SELECT 
+            balance_type,
+            COUNT(*) as users_count,
+            SUM(amount) as total_amount,
+            AVG(amount) as avg_amount
+        FROM user_balance 
+        GROUP BY balance_type
+        """
+        
+        try:
+            async with self.pool.acquire() as connection:
+                result = await connection.fetch(query)
+                return result
+        except Exception as e:
+            self.logger.error(f"❌ Error getting all balances: {e}")
+            return []
 
     async def add_user(self, user_id: int, first_name: str, last_name: str, username: str):
         """Добавление пользователя в базу данных"""

@@ -6,6 +6,7 @@ from config import BotConfig, DatabaseConfig
 from database import Database, UserState
 from middleware import UserStateMiddleware
 from admin_manager import AdminManager
+from balance_manager import BalanceManager
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -93,6 +94,9 @@ async def main():
     # Инициализация менеджера администраторов
     admin_manager = AdminManager(database)
     
+    # Инициализация менеджера баланса
+    balance_manager = BalanceManager(database)
+
     # Инициализация бота и диспетчера
     bot = Bot(token=bot_config.token)
     dp = Dispatcher()
@@ -120,6 +124,7 @@ async def main():
     def get_personal_cabinet_keyboard():
         return InlineKeyboardMarkup(
             inline_keyboard=[
+                [InlineKeyboardButton(text="💰 Баланс", callback_data="user_balance")],
                 [InlineKeyboardButton(text="📊 Статистика", callback_data="user_stats")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
             ]
@@ -371,6 +376,8 @@ async def main():
         if data == "personal_cabinet":
             # Получаем информацию о пользователе
             user_data = await database.get_user(callback_query.from_user.id)
+            bonus_balance = await database.get_balance(callback_query.from_user.id, 'bonus')
+            rubles_balance = await database.get_balance(callback_query.from_user.id, 'rubles')
             
             cabinet_text = f"""
             👤 Личный кабинет
@@ -380,6 +387,10 @@ async def main():
             Имя: {callback_query.from_user.first_name}
             Фамилия: {callback_query.from_user.last_name or 'Не указана'}
             Username: @{callback_query.from_user.username or 'Не указан'}
+            
+            💰 Ваши балансы:
+            💎 Бонусы: {bonus_balance:.2f}
+            💵 Рубли: {rubles_balance:.2f}
             """
             
             if user_data:
@@ -397,7 +408,45 @@ async def main():
                 text=cabinet_text,
                 reply_markup=get_personal_cabinet_keyboard()
             )
-            
+
+        elif data == "user_balance":
+            await balance_manager.show_balance(
+                user_id=callback_query.from_user.id,
+                chat_id=callback_query.message.chat.id,
+                message_manager=message_manager
+            )
+
+        elif data == "balance_deposit":
+            deposit_text = """
+            💰 Пополнение баланса
+
+            Выберите тип баланса для пополнения:
+            • 💎 Бонусные баллы - начисляются за активность
+            • 💵 Рубли - основная валюта для оплаты
+
+            💡 Для тестирования используйте команду /add_balance
+            """
+            await message_manager.send_or_edit_message(
+                chat_id=callback_query.message.chat.id,
+                user_id=callback_query.from_user.id,
+                text=deposit_text,
+                reply_markup=balance_manager.get_deposit_keyboard()
+            )
+
+        elif data == "balance_history":
+            await balance_manager.show_transaction_history(
+                user_id=callback_query.from_user.id,
+                chat_id=callback_query.message.chat.id,
+                message_manager=message_manager
+            )
+
+        elif data == "balance_back":
+            await balance_manager.show_balance(
+                user_id=callback_query.from_user.id,
+                chat_id=callback_query.message.chat.id,
+                message_manager=message_manager
+            )
+
         elif data == "user_stats":
             # Получаем статистику
             users = await database.get_all_users()
